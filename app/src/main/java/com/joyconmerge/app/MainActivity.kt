@@ -14,6 +14,7 @@ import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Switch
 import android.widget.TextView
 import rikka.shizuku.Shizuku
 
@@ -21,6 +22,7 @@ class MainActivity : Activity() {
 
     private lateinit var shizukuStatus: TextView
     private lateinit var mainButton: Button
+    private lateinit var xinputSwitch: Switch
     private lateinit var logView: TextView
     private lateinit var logScroll: ScrollView
 
@@ -95,6 +97,7 @@ class MainActivity : Activity() {
                 mainButton.isEnabled = true
             }
         }
+        xinputSwitch.isEnabled = !running
         mainButton.background = pill(if (running) "#FF5252" else "#00B4E6")
         logView.text = MergeState.log.ifEmpty { "Il registro del motore comparirà qui." }
         logScroll.post { logScroll.fullScroll(ScrollView.FOCUS_DOWN) }
@@ -126,6 +129,21 @@ class MainActivity : Activity() {
             setPadding(0, 0, 0, dp(16))
         }
         root.addView(shizukuStatus)
+
+        xinputSwitch = Switch(this).apply {
+            text = "Modalità Xbox 360 (XInput)"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            isChecked = MergeState.isXinput(this@MainActivity)
+            setOnCheckedChangeListener { _, checked -> MergeState.setXinput(this@MainActivity, checked) }
+        }
+        root.addView(xinputSwitch, LinearLayout.LayoutParams(MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        root.addView(TextView(this).apply {
+            text = "Il controller si presenta come un pad Xbox 360: ZL/ZR diventano grilletti analogici. Si cambia solo da fermo."
+            setTextColor(Color.parseColor("#757575"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setPadding(0, dp(2), 0, dp(16))
+        })
 
         mainButton = Button(this).apply {
             setTextColor(Color.WHITE)

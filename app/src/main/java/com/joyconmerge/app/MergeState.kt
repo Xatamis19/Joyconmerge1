@@ -1,5 +1,6 @@
 package com.joyconmerge.app
 
+import android.content.Context
 import android.os.Handler
 import android.os.Looper
 
@@ -33,6 +34,17 @@ object MergeState {
         synchronized(lines) { lines.clear() }
         notifyListeners()
     }
+
+    /** Modalita' Xbox 360 (XInput): salvata nelle preferenze dell'app. */
+    fun isXinput(ctx: Context): Boolean =
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_XINPUT, false)
+
+    fun setXinput(ctx: Context, value: Boolean) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_XINPUT, value).apply()
+    }
+
+    private const val PREFS = "settings"
+    private const val KEY_XINPUT = "xinput"
 
     fun addListener(l: () -> Unit) = main.post { listeners.add(l); l() }
     fun removeListener(l: () -> Unit) = main.post { listeners.remove(l) }

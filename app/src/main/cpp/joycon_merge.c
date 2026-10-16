@@ -9,8 +9,14 @@
  *   croce           -> hat switch (DPAD)
  *   ZL / ZR         -> pulsanti L2/R2 + assi analogici BRAKE/GAS (0 o massimo)
  *
+ * Modalita' --xinput: il gamepad si presenta come controller Xbox 360
+ * (VID 045E / PID 028E) con la disposizione assi di xpad, cosi' Android usa il suo
+ * layout Xbox e gli emulatori/giochi lo riconoscono come controller XInput:
+ *   stick destro    -> RX / RY
+ *   ZL / ZR         -> grilletti analogici Z / RZ (LTRIGGER / RTRIGGER)
+ *
  * Va eseguito come utente shell (Shizuku/rish o adb shell).
- * Uso: ./joycon_merge        (Ctrl+C per uscire)
+ * Uso: ./joycon_merge [--xinput]   (Ctrl+C per uscire)
  */
 #include <dirent.h>
 #include <errno.h>
@@ -32,6 +38,10 @@
 #define VENDOR_ID  0x1209
 #define PRODUCT_ID 0x0001
 
+/* Xbox 360 cablato: Android ha gia' il layout Vendor_045e_Product_028e.kl */
+#define XBOX_VENDOR_ID  0x045E
+#define XBOX_PRODUCT_ID 0x028E
+
 /*
  * Descrittore HID:
  *  15 pulsanti (+1 bit padding) -> hid-input li mappa su BTN_SOUTH..BTN_THUMBR
@@ -39,7 +49,7 @@
  *  X, Y, Z, Rz a 16 bit con segno
  *  Brake, Accelerator a 8 bit
  */
-static const uint8_t rdesc[] = {
+static const uint8_t rdesc_generic[] = {
     0x05, 0x01,       /* Usage Page (Generic Desktop) */
     0x09, 0x05,       /* Usage (Game Pad) */
     0xA1, 0x01,       /* Collection (Application) */
@@ -88,12 +98,68 @@ static const uint8_t rdesc[] = {
     0xC0              /* End Collection */
 };
 
+/*
+ * Descrittore "Xbox 360": stessi pulsanti e stesso formato di report del
+ * generico, cambiano solo gli usage degli assi:
+ *  X, Y, Rx, Ry a 16 bit con segno  -> ABS_X/Y, ABS_RX/RY (stick)
+ *  Z, Rz a 8 bit                    -> ABS_Z / ABS_RZ (grilletti, come xpad)
+ */
+static const uint8_t rdesc_xinput[] = {
+    0x05, 0x01,       /* Usage Page (Generic Desktop) */
+    0x09, 0x05,       /* Usage (Game Pad) */
+    0xA1, 0x01,       /* Collection (Application) */
+    0x05, 0x09,       /*   Usage Page (Button) */
+    0x19, 0x01,       /*   Usage Minimum (1) */
+    0x29, 0x0F,       /*   Usage Maximum (15) */
+    0x15, 0x00,       /*   Logical Minimum (0) */
+    0x25, 0x01,       /*   Logical Maximum (1) */
+    0x75, 0x01,       /*   Report Size (1) */
+    0x95, 0x0F,       /*   Report Count (15) */
+    0x81, 0x02,       /*   Input (Data,Var,Abs) */
+    0x75, 0x01,       /*   Report Size (1) */
+    0x95, 0x01,       /*   Report Count (1) */
+    0x81, 0x03,       /*   Input (Const) padding */
+    0x05, 0x01,       /*   Usage Page (Generic Desktop) */
+    0x09, 0x39,       /*   Usage (Hat switch) */
+    0x15, 0x00,       /*   Logical Minimum (0) */
+    0x25, 0x07,       /*   Logical Maximum (7) */
+    0x35, 0x00,       /*   Physical Minimum (0) */
+    0x46, 0x3B, 0x01, /*   Physical Maximum (315) */
+    0x65, 0x14,       /*   Unit (Degrees) */
+    0x75, 0x04,       /*   Report Size (4) */
+    0x95, 0x01,       /*   Report Count (1) */
+    0x81, 0x42,       /*   Input (Data,Var,Abs,Null) */
+    0x65, 0x00,       /*   Unit (None) */
+    0x75, 0x04,       /*   Report Size (4) */
+    0x95, 0x01,       /*   Report Count (1) */
+    0x81, 0x03,       /*   Input (Const) padding */
+    0x09, 0x30,       /*   Usage (X) */
+    0x09, 0x31,       /*   Usage (Y) */
+    0x09, 0x33,       /*   Usage (Rx) */
+    0x09, 0x34,       /*   Usage (Ry) */
+    0x16, 0x01, 0x80, /*   Logical Minimum (-32767) */
+    0x26, 0xFF, 0x7F, /*   Logical Maximum (32767) */
+    0x75, 0x10,       /*   Report Size (16) */
+    0x95, 0x04,       /*   Report Count (4) */
+    0x81, 0x02,       /*   Input (Data,Var,Abs) */
+    0x09, 0x32,       /*   Usage (Z)  - grilletto sinistro */
+    0x09, 0x35,       /*   Usage (Rz) - grilletto destro */
+    0x15, 0x00,       /*   Logical Minimum (0) */
+    0x26, 0xFF, 0x00, /*   Logical Maximum (255) */
+    0x75, 0x08,       /*   Report Size (8) */
+    0x95, 0x02,       /*   Report Count (2) */
+    0x81, 0x02,       /*   Input (Data,Var,Abs) */
+    0xC0              /* End Collection */
+};
+
+static int xinput_mode = 0;
+
 #pragma pack(push, 1)
 struct report {
     uint16_t buttons;   /* bit n = BTN_SOUTH + n */
     uint8_t hat;        /* 0..7, 8 = centro */
     int16_t lx, ly, rx, ry;
-    uint8_t brake, gas;
+    uint8_t brake, gas; /* in modalita' XInput: grilletti LT / RT */
 };
 #pragma pack(pop)
 
@@ -140,16 +206,19 @@ static int uhid_create(int fd) {
     struct uhid_event ev;
     memset(&ev, 0, sizeof(ev));
     ev.type = UHID_CREATE2;
-    snprintf((char *)ev.u.create2.name, sizeof(ev.u.create2.name), "Joy-Con Combined (merge)");
+    const uint8_t *rd = xinput_mode ? rdesc_xinput : rdesc_generic;
+    size_t rd_size = xinput_mode ? sizeof(rdesc_xinput) : sizeof(rdesc_generic);
+    snprintf((char *)ev.u.create2.name, sizeof(ev.u.create2.name), "%s",
+             xinput_mode ? "Microsoft X-Box 360 pad" : "Joy-Con Combined (merge)");
     snprintf((char *)ev.u.create2.phys, sizeof(ev.u.create2.phys), "joycon-merge/0");
     snprintf((char *)ev.u.create2.uniq, sizeof(ev.u.create2.uniq), "joycon-merge-0");
-    ev.u.create2.rd_size = sizeof(rdesc);
+    ev.u.create2.rd_size = (uint16_t)rd_size;
     ev.u.create2.bus = BUS_USB;
-    ev.u.create2.vendor = VENDOR_ID;
-    ev.u.create2.product = PRODUCT_ID;
-    ev.u.create2.version = 1;
+    ev.u.create2.vendor = xinput_mode ? XBOX_VENDOR_ID : VENDOR_ID;
+    ev.u.create2.product = xinput_mode ? XBOX_PRODUCT_ID : PRODUCT_ID;
+    ev.u.create2.version = xinput_mode ? 0x0114 : 1;
     ev.u.create2.country = 0;
-    memcpy(ev.u.create2.rd_data, rdesc, sizeof(rdesc));
+    memcpy(ev.u.create2.rd_data, rd, rd_size);
     return uhid_write(fd, &ev);
 }
 
@@ -177,6 +246,9 @@ static uint8_t hat_from(const struct state *s) {
 static int send_report(int fd, const struct state *s) {
     struct report r;
     r.buttons = s->buttons;
+    /* L'Xbox 360 non ha pulsanti L2/R2: i grilletti sono solo assi */
+    if (xinput_mode)
+        r.buttons &= (uint16_t)~((1u << (BTN_TL2 - BTN_SOUTH)) | (1u << (BTN_TR2 - BTN_SOUTH)));
     r.hat = hat_from(s);
     r.lx = s->lx; r.ly = s->ly; r.rx = s->rx; r.ry = s->ry;
     r.brake = (s->buttons & (1u << (BTN_TL2 - BTN_SOUTH))) ? 255 : 0;
@@ -257,8 +329,15 @@ static int handle(int fd, int is_left, struct state *s) {
     return synced;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--xinput") == 0) xinput_mode = 1;
+        else {
+            fprintf(stderr, "Opzione sconosciuta: %s\nUso: %s [--xinput]\n", argv[i], argv[0]);
+            return 2;
+        }
+    }
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
     signal(SIGHUP, on_signal);
@@ -284,7 +363,10 @@ int main(void) {
     if (ioctl(fl, EVIOCGRAB, 1) < 0) perror("EVIOCGRAB sinistro");
     if (ioctl(fr, EVIOCGRAB, 1) < 0) perror("EVIOCGRAB destro");
 
-    printf("Gamepad virtuale \"Joy-Con Combined (merge)\" attivo. Ctrl+C per uscire.\n");
+    if (xinput_mode)
+        printf("Modalita' XInput: gamepad virtuale \"Xbox 360\" (045E:028E) attivo. Ctrl+C per uscire.\n");
+    else
+        printf("Gamepad virtuale \"Joy-Con Combined (merge)\" attivo. Ctrl+C per uscire.\n");
 
     struct state s;
     memset(&s, 0, sizeof(s));

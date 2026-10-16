@@ -58,7 +58,8 @@ class MergeService : Service() {
                     return@Thread
                 }
 
-                val p = ShizukuHelper.exec("exec $ENGINE 2>&1")
+                val args = if (MergeState.isXinput(this)) " --xinput" else ""
+                val p = ShizukuHelper.exec("exec $ENGINE$args 2>&1")
                 if (p == null) {
                     MergeState.append("Impossibile avviare il motore.")
                     return@Thread
