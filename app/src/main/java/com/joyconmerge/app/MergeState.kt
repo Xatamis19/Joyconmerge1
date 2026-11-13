@@ -52,6 +52,15 @@ object MergeState {
             .putString(KEY_SOURCE, if (value) SOURCE_DS4 else SOURCE_JOYCON).apply()
     }
 
+    /** DualShock 4: lascia il touchpad ad Android come mouse (comodo nei menu). */
+    fun isKeepTouchpad(ctx: Context): Boolean =
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_TOUCHPAD, true)
+
+    fun setKeepTouchpad(ctx: Context, value: Boolean) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_TOUCHPAD, value).apply()
+    }
+
+    private const val KEY_TOUCHPAD = "keep_touchpad"
     private const val PREFS = "settings"
     private const val KEY_XINPUT = "xinput"
     private const val KEY_SOURCE = "source"

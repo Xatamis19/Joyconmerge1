@@ -27,6 +27,8 @@ class MainActivity : Activity() {
     private lateinit var xinputSwitch: Switch
     private lateinit var sourceGroup: RadioGroup
     private lateinit var xinputHint: TextView
+    private lateinit var touchpadSwitch: Switch
+    private lateinit var touchpadHint: TextView
     private lateinit var logView: TextView
     private lateinit var logScroll: ScrollView
 
@@ -111,8 +113,11 @@ class MainActivity : Activity() {
         for (i in 0 until sourceGroup.childCount) sourceGroup.getChildAt(i).isEnabled = !running
         xinputSwitch.isEnabled = !running && !ds4
         xinputSwitch.isChecked = ds4 || MergeState.isXinput(this)
+        touchpadSwitch.visibility = if (ds4) android.view.View.VISIBLE else android.view.View.GONE
+        touchpadHint.visibility = touchpadSwitch.visibility
+        touchpadSwitch.isEnabled = !running
         xinputHint.text = if (ds4)
-            "Il DualShock 4 viene sempre presentato come pad Xbox 360 (XInput): L2/R2 analogici, Quadrato/Triangolo = X/Y. Touchpad e sensori vengono nascosti."
+            "Il DualShock 4 viene sempre presentato come pad Xbox 360 (XInput): L2/R2 analogici, Quadrato/Triangolo = X/Y. "
         else
             "Il controller si presenta come un pad Xbox 360: ZL/ZR diventano grilletti analogici. Si cambia solo da fermo."
         mainButton.background = pill(if (running) "#FF5252" else "#00B4E6")
@@ -195,6 +200,22 @@ class MainActivity : Activity() {
             setPadding(0, dp(2), 0, dp(16))
         }
         root.addView(xinputHint)
+
+        touchpadSwitch = Switch(this).apply {
+            text = "Touchpad come mouse"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            isChecked = MergeState.isKeepTouchpad(this@MainActivity)
+            setOnCheckedChangeListener { _, checked -> MergeState.setKeepTouchpad(this@MainActivity, checked) }
+        }
+        root.addView(touchpadSwitch, LinearLayout.LayoutParams(MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        touchpadHint = TextView(this).apply {
+            text = "Acceso: il touchpad del DualShock muove il cursore (comodo nei menu). Spento: viene nascosto."
+            setTextColor(Color.parseColor("#757575"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setPadding(0, dp(2), 0, dp(16))
+        }
+        root.addView(touchpadHint)
 
         mainButton = Button(this).apply {
             setTextColor(Color.WHITE)

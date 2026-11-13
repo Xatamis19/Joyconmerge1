@@ -55,9 +55,10 @@ Utile per giochi ed emulatori Windows (Winlator, GameNative…) che riconoscono 
 | Share, Options, PS | Back, Start, Guide |
 | Croce direzionale | D-pad |
 
-Touchpad e sensori di movimento vengono bloccati insieme al controller, così Android vede un solo
-pad. Il clic del touchpad e la vibrazione non vengono ancora inoltrati.
-Da shell: `joycon_merge --ds4 --xinput`.
+Con **Touchpad come mouse** (attivo di default) il touchpad resta ad Android e muove il cursore,
+comodo nei menu; spegnendolo viene nascosto insieme ai sensori di movimento.
+La vibrazione non viene ancora inoltrata.
+Da shell: `joycon_merge --ds4 --xinput [--keep-touchpad]`.
 
 ## Come funziona
 L'app avvia tramite Shizuku un piccolo programma C (`app/src/main/cpp/joycon_merge.c`)

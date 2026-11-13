@@ -60,7 +60,8 @@ class MergeService : Service() {
 
                 // Il DualShock 4 serve solo per diventare un pad Xbox: XInput sempre attivo
                 val args = when {
-                    MergeState.isDs4(this) -> " --ds4 --xinput"
+                    MergeState.isDs4(this) ->
+                        " --ds4 --xinput" + if (MergeState.isKeepTouchpad(this)) " --keep-touchpad" else ""
                     MergeState.isXinput(this) -> " --xinput"
                     else -> ""
                 }

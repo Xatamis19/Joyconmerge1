@@ -170,6 +170,7 @@ static int xinput_mode = 0;
  */
 static int xinput_alt = 0;
 static int ds4_mode = 0;
+static int keep_touchpad = 0; /* --keep-touchpad: il touchpad resta un mouse per Android */
 
 #pragma pack(push, 1)
 struct report {
@@ -479,7 +480,10 @@ static int open_ds4(char *path_out, size_t path_len, int *extra, int *n_extra) {
                    ((found_uniq[0] && strcmp(found_uniq, cand_uniq[i]) == 0) ||
                     (found_phys[0] && strcmp(found_phys, cand_phys[i]) == 0) ||
                     strstr(cand_name[i], "Touchpad") || strstr(cand_name[i], "Motion"));
-        if (same && *n_extra < MAX_EXTRA) {
+        if (same && keep_touchpad && strstr(cand_name[i], "Touchpad")) {
+            printf("Touchpad lasciato ad Android (mouse): %s\n", cand_name[i]);
+            close(cand[i]);
+        } else if (same && *n_extra < MAX_EXTRA) {
             printf("Nascondo anche: %s\n", cand_name[i]);
             extra[(*n_extra)++] = cand[i];
         } else {
@@ -731,8 +735,9 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--xinput") == 0) xinput_mode = 1;
         else if (strcmp(argv[i], "--ds4") == 0) ds4_mode = 1;
+        else if (strcmp(argv[i], "--keep-touchpad") == 0) keep_touchpad = 1;
         else {
-            fprintf(stderr, "Opzione sconosciuta: %s\nUso: %s [--ds4] [--xinput]\n", argv[i], argv[0]);
+            fprintf(stderr, "Opzione sconosciuta: %s\nUso: %s [--ds4] [--keep-touchpad] [--xinput]\n", argv[i], argv[0]);
             return 2;
         }
     }
