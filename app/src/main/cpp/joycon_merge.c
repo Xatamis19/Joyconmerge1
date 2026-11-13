@@ -434,7 +434,7 @@ static int open_ds4(char *path_out, size_t path_len, int *extra, int *n_extra) {
     return found;
 }
 
-static void ds4_detect_driver(const char *path) {
+static void ds4_detect_driver(int fd, const char *path) {
     const char *ev = strrchr(path, '/');
     ev = ev ? ev + 1 : path;
     char link[300], target[300] = "";
@@ -443,8 +443,16 @@ static void ds4_detect_driver(const char *path) {
     if (n > 0) target[n] = 0;
     const char *drv = strrchr(target, '/');
     drv = drv ? drv + 1 : target;
-    if (!drv[0]) drv = "sconosciuto";
-    ds4_generic_driver = strstr(drv, "playstation") == NULL && strstr(drv, "sony") == NULL;
+    if (!drv[0]) drv = "non leggibile";
+
+    /*
+     * Il layout si decide dalle capacita' del dispositivo, non da sysfs (che la shell
+     * potrebbe non poter leggere): hid-playstation/hid-sony non usano mai BTN_C/BTN_Z,
+     * mentre con hid-generic i pulsanti 3 e 6 del DS4 diventano proprio BTN_C e BTN_Z.
+     */
+    unsigned long keyb[(KEY_CNT + 8 * sizeof(long) - 1) / (8 * sizeof(long))] = {0};
+    ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keyb)), keyb);
+    ds4_generic_driver = test_bit(keyb, BTN_C) || test_bit(keyb, BTN_Z);
     printf("Driver kernel: %s -> layout %s\n", drv, ds4_generic_driver ? "HID generico" : "standard");
 }
 
@@ -580,7 +588,7 @@ static int run_ds4(void) {
     char name[256] = "";
     ioctl(fd, EVIOCGNAME(sizeof(name) - 1), name);
     printf("Controller: %s (%s)\n", name, path);
-    ds4_detect_driver(path);
+    ds4_detect_driver(fd, path);
     ds4_read_ranges(fd);
 
     int fu = open("/dev/uhid", O_RDWR | O_CLOEXEC);
