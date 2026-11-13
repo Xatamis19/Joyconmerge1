@@ -181,6 +181,14 @@ struct state {
     uint8_t lt, rt;
 };
 
+/*
+ * Driver del kernel che gestisce il DS4: con hid-playstation/hid-sony gli assi sono
+ * "standard" (RX/RY = stick destro, Z/RZ = grilletti). Se il kernel non li ha, il
+ * controller finisce su hid-generic e il layout e' diverso (Z/RZ = stick destro,
+ * RX/RY = grilletti, pulsanti nell'ordine grezzo del DS4).
+ */
+static int ds4_generic_driver = 0;
+
 /* range degli assi del DS4, letti con EVIOCGABS */
 struct range { int min, max; };
 static struct range ds4_rng[ABS_CNT];
@@ -368,7 +376,7 @@ static int open_ds4(char *path_out, size_t path_len, int *extra, int *n_extra) {
     struct dirent *de;
     int found = -1;
     char found_uniq[64] = "", found_phys[64] = "";
-    int cand[32]; char cand_uniq[32][64]; char cand_phys[32][64]; int nc = 0;
+    int cand[32]; char cand_uniq[32][64]; char cand_phys[32][64]; char cand_name[32][128]; int nc = 0;
 
     while ((de = readdir(dir)) != NULL) {
         if (strncmp(de->d_name, "event", 5) != 0) continue;
@@ -379,7 +387,8 @@ static int open_ds4(char *path_out, size_t path_len, int *extra, int *n_extra) {
         struct input_id id;
         if (ioctl(fd, EVIOCGID, &id) < 0 || id.vendor != SONY_VENDOR_ID) { close(fd); continue; }
 
-        char uniq[64] = "", phys[64] = "";
+        char uniq[64] = "", phys[64] = "", dname[128] = "";
+        ioctl(fd, EVIOCGNAME(sizeof(dname) - 1), dname);
         ioctl(fd, EVIOCGUNIQ(sizeof(uniq) - 1), uniq);
         ioctl(fd, EVIOCGPHYS(sizeof(phys) - 1), phys);
         /* phys e' tipo "xx:xx:..:xx/input0": teniamo solo la parte prima di '/' */
@@ -401,6 +410,7 @@ static int open_ds4(char *path_out, size_t path_len, int *extra, int *n_extra) {
             cand[nc] = fd;
             snprintf(cand_uniq[nc], 64, "%s", uniq);
             snprintf(cand_phys[nc], 64, "%s", phys);
+            snprintf(cand_name[nc], 128, "%s", dname);
             nc++;
         } else {
             close(fd);
@@ -409,13 +419,53 @@ static int open_ds4(char *path_out, size_t path_len, int *extra, int *n_extra) {
     closedir(dir);
 
     for (int i = 0; i < nc; i++) {
+        /* stesso controller: stesso uniq/phys, oppure i nodi "Touchpad"/"Motion Sensors" Sony */
         int same = found >= 0 &&
                    ((found_uniq[0] && strcmp(found_uniq, cand_uniq[i]) == 0) ||
-                    (found_phys[0] && strcmp(found_phys, cand_phys[i]) == 0));
-        if (same && *n_extra < MAX_EXTRA) extra[(*n_extra)++] = cand[i];
-        else close(cand[i]);
+                    (found_phys[0] && strcmp(found_phys, cand_phys[i]) == 0) ||
+                    strstr(cand_name[i], "Touchpad") || strstr(cand_name[i], "Motion"));
+        if (same && *n_extra < MAX_EXTRA) {
+            printf("Nascondo anche: %s\n", cand_name[i]);
+            extra[(*n_extra)++] = cand[i];
+        } else {
+            close(cand[i]);
+        }
     }
     return found;
+}
+
+static void ds4_detect_driver(const char *path) {
+    const char *ev = strrchr(path, '/');
+    ev = ev ? ev + 1 : path;
+    char link[300], target[300] = "";
+    snprintf(link, sizeof(link), "/sys/class/input/%s/device/device/driver", ev);
+    ssize_t n = readlink(link, target, sizeof(target) - 1);
+    if (n > 0) target[n] = 0;
+    const char *drv = strrchr(target, '/');
+    drv = drv ? drv + 1 : target;
+    if (!drv[0]) drv = "sconosciuto";
+    ds4_generic_driver = strstr(drv, "playstation") == NULL && strstr(drv, "sony") == NULL;
+    printf("Driver kernel: %s -> layout %s\n", drv, ds4_generic_driver ? "HID generico" : "standard");
+}
+
+/* layout hid-generic: posizione nel DS4 -> codice standard */
+static int ds4_generic_button(int code) {
+    switch (code) {
+    case BTN_SOUTH:  return BTN_WEST;   /* 1 Quadrato  -> X Xbox (0x134 prima dello scambio) */
+    case BTN_EAST:   return BTN_SOUTH;  /* 2 Croce     -> A */
+    case BTN_C:      return BTN_EAST;   /* 3 Cerchio   -> B */
+    case BTN_NORTH:  return BTN_NORTH;  /* 4 Triangolo -> Y (scambiato sotto) */
+    case BTN_WEST:   return BTN_TL;     /* 5 L1 */
+    case BTN_Z:      return BTN_TR;     /* 6 R1 */
+    case BTN_TL:     return BTN_TL2;    /* 7 L2 (digitale) */
+    case BTN_TR:     return BTN_TR2;    /* 8 R2 (digitale) */
+    case BTN_TL2:    return BTN_SELECT; /* 9 Share */
+    case BTN_TR2:    return BTN_START;  /* 10 Options */
+    case BTN_SELECT: return BTN_THUMBL; /* 11 L3 */
+    case BTN_START:  return BTN_THUMBR; /* 12 R3 */
+    case BTN_MODE:   return BTN_MODE;   /* 13 PS */
+    default:         return -1;         /* clic touchpad e altro: ignorati */
+    }
 }
 
 static void ds4_read_ranges(int fd) {
@@ -425,7 +475,9 @@ static void ds4_read_ranges(int fd) {
         if (ioctl(fd, EVIOCGABS(axes[i]), &ai) == 0 && ai.maximum > ai.minimum) {
             ds4_rng[axes[i]].min = ai.minimum;
             ds4_rng[axes[i]].max = ai.maximum;
+            printf("Asse %#x: %d..%d\n", axes[i], ai.minimum, ai.maximum);
         } else {
+            printf("Asse %#x: non trovato, uso 0..255\n", axes[i]);
             ds4_rng[axes[i]].min = 0;
             ds4_rng[axes[i]].max = 255;
         }
@@ -474,17 +526,29 @@ static int handle_ds4(int fd, struct state *s) {
             } else if (e->type == EV_KEY) {
                 int v = e->value != 0;
                 int code = e->code;
+                if (ds4_generic_driver) {
+                    code = ds4_generic_button(code);
+                    if (code < 0) continue;
+                }
                 if (code == BTN_WEST) code = BTN_NORTH;
                 else if (code == BTN_NORTH) code = BTN_WEST;
                 set_button(s, code, v);
             } else if (e->type == EV_ABS) {
-                switch (e->code) {
-                case ABS_X:  s->lx = scale_stick(ABS_X, e->value); break;
-                case ABS_Y:  s->ly = scale_stick(ABS_Y, e->value); break;
-                case ABS_RX: s->rx = scale_stick(ABS_RX, e->value); break;
-                case ABS_RY: s->ry = scale_stick(ABS_RY, e->value); break;
-                case ABS_Z:  s->lt = scale_trigger(ABS_Z, e->value); break;
-                case ABS_RZ: s->rt = scale_trigger(ABS_RZ, e->value); break;
+                int acode = e->code;
+                if (ds4_generic_driver) {
+                    /* Z/RZ = stick destro, RX/RY = grilletti */
+                    if (acode == ABS_Z) acode = ABS_RX;
+                    else if (acode == ABS_RZ) acode = ABS_RY;
+                    else if (acode == ABS_RX) acode = ABS_Z;
+                    else if (acode == ABS_RY) acode = ABS_RZ;
+                }
+                switch (acode) {
+                case ABS_X:  s->lx = scale_stick(e->code, e->value); break;
+                case ABS_Y:  s->ly = scale_stick(e->code, e->value); break;
+                case ABS_RX: s->rx = scale_stick(e->code, e->value); break;
+                case ABS_RY: s->ry = scale_stick(e->code, e->value); break;
+                case ABS_Z:  s->lt = scale_trigger(e->code, e->value); break;
+                case ABS_RZ: s->rt = scale_trigger(e->code, e->value); break;
                 case ABS_HAT0X: s->left = e->value < 0; s->right = e->value > 0; break;
                 case ABS_HAT0Y: s->up = e->value < 0; s->down = e->value > 0; break;
                 }
@@ -516,6 +580,7 @@ static int run_ds4(void) {
     char name[256] = "";
     ioctl(fd, EVIOCGNAME(sizeof(name) - 1), name);
     printf("Controller: %s (%s)\n", name, path);
+    ds4_detect_driver(path);
     ds4_read_ranges(fd);
 
     int fu = open("/dev/uhid", O_RDWR | O_CLOEXEC);
@@ -526,7 +591,8 @@ static int run_ds4(void) {
     if (uhid_create(fu) < 0) return 1;
 
     if (ioctl(fd, EVIOCGRAB, 1) < 0) perror("EVIOCGRAB controller");
-    for (int i = 0; i < n_extra; i++) ioctl(extra[i], EVIOCGRAB, 1);
+    for (int i = 0; i < n_extra; i++)
+        if (ioctl(extra[i], EVIOCGRAB, 1) < 0) perror("EVIOCGRAB nodo extra");
     if (n_extra) printf("Bloccati anche %d nodi extra (touchpad/sensori).\n", n_extra);
 
     printf("DualShock 4 -> %s attivo. Ctrl+C per uscire.\n",
