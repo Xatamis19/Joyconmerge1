@@ -58,7 +58,12 @@ class MergeService : Service() {
                     return@Thread
                 }
 
-                val args = if (MergeState.isXinput(this)) " --xinput" else ""
+                // Il DualShock 4 serve solo per diventare un pad Xbox: XInput sempre attivo
+                val args = when {
+                    MergeState.isDs4(this) -> " --ds4 --xinput"
+                    MergeState.isXinput(this) -> " --xinput"
+                    else -> ""
+                }
                 val p = ShizukuHelper.exec("exec $ENGINE$args 2>&1")
                 if (p == null) {
                     MergeState.append("Impossibile avviare il motore.")
@@ -117,7 +122,7 @@ class MergeService : Service() {
         )
         val n: Notification = Notification.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_notify)
-            .setContentTitle("Joy-Con uniti")
+            .setContentTitle(if (MergeState.isDs4(this)) "DualShock 4 → Xbox 360" else "Joy-Con uniti")
             .setContentText("Gamepad virtuale attivo")
             .setContentIntent(open)
             .setOngoing(true)

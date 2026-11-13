@@ -13,6 +13,8 @@ import android.view.Gravity
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.RadioButton
+import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
@@ -23,6 +25,8 @@ class MainActivity : Activity() {
     private lateinit var shizukuStatus: TextView
     private lateinit var mainButton: Button
     private lateinit var xinputSwitch: Switch
+    private lateinit var sourceGroup: RadioGroup
+    private lateinit var xinputHint: TextView
     private lateinit var logView: TextView
     private lateinit var logScroll: ScrollView
 
@@ -91,13 +95,26 @@ class MainActivity : Activity() {
                 mainButton.isEnabled = true
             }
             else -> {
-                shizukuStatus.text = if (running) "Joy-Con uniti: gamepad virtuale attivo." else "Pronto. Collega i due Joy-Con e premi Avvia."
+                val ds4 = MergeState.isDs4(this)
+                shizukuStatus.text = when {
+                    running && ds4 -> "DualShock 4 attivo come pad Xbox 360."
+                    running -> "Joy-Con uniti: gamepad virtuale attivo."
+                    ds4 -> "Pronto. Collega il DualShock 4 e premi Avvia."
+                    else -> "Pronto. Collega i due Joy-Con e premi Avvia."
+                }
                 shizukuStatus.setTextColor(Color.parseColor(if (running) "#69F0AE" else "#B0BEC5"))
                 mainButton.text = if (running) "Ferma" else "Avvia"
                 mainButton.isEnabled = true
             }
         }
-        xinputSwitch.isEnabled = !running
+        val ds4 = MergeState.isDs4(this)
+        for (i in 0 until sourceGroup.childCount) sourceGroup.getChildAt(i).isEnabled = !running
+        xinputSwitch.isEnabled = !running && !ds4
+        xinputSwitch.isChecked = ds4 || MergeState.isXinput(this)
+        xinputHint.text = if (ds4)
+            "Il DualShock 4 viene sempre presentato come pad Xbox 360 (XInput): L2/R2 analogici, Quadrato/Triangolo = X/Y. Touchpad e sensori vengono nascosti."
+        else
+            "Il controller si presenta come un pad Xbox 360: ZL/ZR diventano grilletti analogici. Si cambia solo da fermo."
         mainButton.background = pill(if (running) "#FF5252" else "#00B4E6")
         logView.text = MergeState.log.ifEmpty { "Il registro del motore comparirà qui." }
         logScroll.post { logScroll.fullScroll(ScrollView.FOCUS_DOWN) }
@@ -118,7 +135,7 @@ class MainActivity : Activity() {
             typeface = Typeface.DEFAULT_BOLD
         })
         root.addView(TextView(this).apply {
-            text = "Unisce Joy-Con (L) e (R) in un unico controller per gli emulatori."
+            text = "Unisce i Joy-Con in un unico controller, oppure trasforma un DualShock 4 in un pad Xbox 360 (XInput)."
             setTextColor(Color.parseColor("#9E9E9E"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             setPadding(0, dp(4), 0, dp(24))
@@ -130,20 +147,54 @@ class MainActivity : Activity() {
         }
         root.addView(shizukuStatus)
 
+        root.addView(TextView(this).apply {
+            text = "Controller"
+            setTextColor(Color.parseColor("#9E9E9E"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            setPadding(0, 0, 0, dp(4))
+        })
+        sourceGroup = RadioGroup(this).apply {
+            orientation = RadioGroup.HORIZONTAL
+            val joy = RadioButton(this@MainActivity).apply {
+                id = 1001
+                text = "Joy-Con (L+R)"
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            }
+            val ds4 = RadioButton(this@MainActivity).apply {
+                id = 1002
+                text = "DualShock 4"
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                setPadding(dp(4), 0, 0, 0)
+            }
+            addView(joy)
+            addView(ds4)
+            check(if (MergeState.isDs4(this@MainActivity)) 1002 else 1001)
+            setOnCheckedChangeListener { _, id ->
+                MergeState.setDs4(this@MainActivity, id == 1002)
+                render()
+            }
+        }
+        root.addView(sourceGroup, LinearLayout.LayoutParams(MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        root.addView(android.view.View(this), LinearLayout.LayoutParams(MATCH_PARENT, dp(12)))
+
         xinputSwitch = Switch(this).apply {
             text = "Modalità Xbox 360 (XInput)"
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
             isChecked = MergeState.isXinput(this@MainActivity)
-            setOnCheckedChangeListener { _, checked -> MergeState.setXinput(this@MainActivity, checked) }
+            setOnCheckedChangeListener { _, checked ->
+                if (!MergeState.isDs4(this@MainActivity)) MergeState.setXinput(this@MainActivity, checked)
+            }
         }
         root.addView(xinputSwitch, LinearLayout.LayoutParams(MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-        root.addView(TextView(this).apply {
-            text = "Il controller si presenta come un pad Xbox 360: ZL/ZR diventano grilletti analogici. Si cambia solo da fermo."
+        xinputHint = TextView(this).apply {
             setTextColor(Color.parseColor("#757575"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setPadding(0, dp(2), 0, dp(16))
-        })
+        }
+        root.addView(xinputHint)
 
         mainButton = Button(this).apply {
             setTextColor(Color.WHITE)

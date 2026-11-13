@@ -43,8 +43,20 @@ object MergeState {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_XINPUT, value).apply()
     }
 
+    /** Sorgente: Joy-Con (L+R) oppure DualShock 4. */
+    fun isDs4(ctx: Context): Boolean =
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_SOURCE, SOURCE_JOYCON) == SOURCE_DS4
+
+    fun setDs4(ctx: Context, value: Boolean) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString(KEY_SOURCE, if (value) SOURCE_DS4 else SOURCE_JOYCON).apply()
+    }
+
     private const val PREFS = "settings"
     private const val KEY_XINPUT = "xinput"
+    private const val KEY_SOURCE = "source"
+    private const val SOURCE_JOYCON = "joycon"
+    private const val SOURCE_DS4 = "ds4"
 
     fun addListener(l: () -> Unit) = main.post { listeners.add(l); l() }
     fun removeListener(l: () -> Unit) = main.post { listeners.remove(l) }

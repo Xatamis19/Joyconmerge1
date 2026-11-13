@@ -15,8 +15,14 @@
  *   stick destro    -> RX / RY
  *   ZL / ZR         -> grilletti analogici Z / RZ (LTRIGGER / RTRIGGER)
  *
+ * Sorgente --ds4: invece dei Joy-Con legge un DualShock 4 (o DualSense) gestito dal
+ * driver hid-playstation/hid-sony e lo ripresenta come pad Xbox 360 (va usato con
+ * --xinput): grilletti L2/R2 analogici, Quadrato/Triangolo -> X/Y Xbox, Share/Options/PS
+ * -> Back/Start/Guide. Anche touchpad e sensori di movimento vengono "bloccati", cosi'
+ * Android vede un solo controller.
+ *
  * Va eseguito come utente shell (Shizuku/rish o adb shell).
- * Uso: ./joycon_merge [--xinput]   (Ctrl+C per uscire)
+ * Uso: ./joycon_merge [--ds4] [--xinput]   (Ctrl+C per uscire)
  */
 #include <dirent.h>
 #include <errno.h>
@@ -33,6 +39,9 @@
 
 #define NAME_L "Joy-Con (L)"
 #define NAME_R "Joy-Con (R)"
+
+#define SONY_VENDOR_ID 0x054C
+#define MAX_EXTRA 4
 
 /* ID neutro (pid.codes): evita che hid-nintendo o altri driver si aggancino */
 #define VENDOR_ID  0x1209
@@ -153,6 +162,7 @@ static const uint8_t rdesc_xinput[] = {
 };
 
 static int xinput_mode = 0;
+static int ds4_mode = 0;
 
 #pragma pack(push, 1)
 struct report {
@@ -167,7 +177,13 @@ struct state {
     uint16_t buttons;
     int up, down, left, right;
     int16_t lx, ly, rx, ry;
+    int analog_triggers;  /* 1 = lt/rt arrivano da assi veri (DS4) */
+    uint8_t lt, rt;
 };
+
+/* range degli assi del DS4, letti con EVIOCGABS */
+struct range { int min, max; };
+static struct range ds4_rng[ABS_CNT];
 
 static volatile sig_atomic_t running = 1;
 static void on_signal(int sig) { (void)sig; running = 0; }
@@ -209,7 +225,8 @@ static int uhid_create(int fd) {
     const uint8_t *rd = xinput_mode ? rdesc_xinput : rdesc_generic;
     size_t rd_size = xinput_mode ? sizeof(rdesc_xinput) : sizeof(rdesc_generic);
     snprintf((char *)ev.u.create2.name, sizeof(ev.u.create2.name), "%s",
-             xinput_mode ? "Microsoft X-Box 360 pad" : "Joy-Con Combined (merge)");
+             xinput_mode ? "Microsoft X-Box 360 pad"
+                         : ds4_mode ? "DualShock 4 (merge)" : "Joy-Con Combined (merge)");
     snprintf((char *)ev.u.create2.phys, sizeof(ev.u.create2.phys), "joycon-merge/0");
     snprintf((char *)ev.u.create2.uniq, sizeof(ev.u.create2.uniq), "joycon-merge-0");
     ev.u.create2.rd_size = (uint16_t)rd_size;
@@ -251,8 +268,13 @@ static int send_report(int fd, const struct state *s) {
         r.buttons &= (uint16_t)~((1u << (BTN_TL2 - BTN_SOUTH)) | (1u << (BTN_TR2 - BTN_SOUTH)));
     r.hat = hat_from(s);
     r.lx = s->lx; r.ly = s->ly; r.rx = s->rx; r.ry = s->ry;
-    r.brake = (s->buttons & (1u << (BTN_TL2 - BTN_SOUTH))) ? 255 : 0;
-    r.gas   = (s->buttons & (1u << (BTN_TR2 - BTN_SOUTH))) ? 255 : 0;
+    if (s->analog_triggers) {
+        r.brake = s->lt;
+        r.gas = s->rt;
+    } else {
+        r.brake = (s->buttons & (1u << (BTN_TL2 - BTN_SOUTH))) ? 255 : 0;
+        r.gas   = (s->buttons & (1u << (BTN_TR2 - BTN_SOUTH))) ? 255 : 0;
+    }
 
     struct uhid_event ev;
     memset(&ev, 0, sizeof(ev));
@@ -329,18 +351,251 @@ static int handle(int fd, int is_left, struct state *s) {
     return synced;
 }
 
+/* ---------------------------------------------------------------- DualShock 4 */
+
+static int test_bit(const unsigned long *bits, int n) {
+    return (bits[n / (8 * sizeof(long))] >> (n % (8 * sizeof(long)))) & 1;
+}
+
+/*
+ * Trova il nodo "gamepad" di un controller Sony (assi RX + pulsante SOUTH) e,
+ * con lo stesso uniq/phys, gli altri nodi (touchpad, sensori) da bloccare.
+ */
+static int open_ds4(char *path_out, size_t path_len, int *extra, int *n_extra) {
+    *n_extra = 0;
+    DIR *dir = opendir("/dev/input");
+    if (!dir) { perror("opendir /dev/input"); return -1; }
+    struct dirent *de;
+    int found = -1;
+    char found_uniq[64] = "", found_phys[64] = "";
+    int cand[32]; char cand_uniq[32][64]; char cand_phys[32][64]; int nc = 0;
+
+    while ((de = readdir(dir)) != NULL) {
+        if (strncmp(de->d_name, "event", 5) != 0) continue;
+        char path[300];
+        snprintf(path, sizeof(path), "/dev/input/%s", de->d_name);
+        int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+        if (fd < 0) continue;
+        struct input_id id;
+        if (ioctl(fd, EVIOCGID, &id) < 0 || id.vendor != SONY_VENDOR_ID) { close(fd); continue; }
+
+        char uniq[64] = "", phys[64] = "";
+        ioctl(fd, EVIOCGUNIQ(sizeof(uniq) - 1), uniq);
+        ioctl(fd, EVIOCGPHYS(sizeof(phys) - 1), phys);
+        /* phys e' tipo "xx:xx:..:xx/input0": teniamo solo la parte prima di '/' */
+        char *slash = strchr(phys, '/');
+        if (slash) *slash = 0;
+
+        unsigned long absb[(ABS_CNT + 8 * sizeof(long) - 1) / (8 * sizeof(long))] = {0};
+        unsigned long keyb[(KEY_CNT + 8 * sizeof(long) - 1) / (8 * sizeof(long))] = {0};
+        ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(absb)), absb);
+        ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keyb)), keyb);
+        int is_pad = test_bit(absb, ABS_RX) && test_bit(keyb, BTN_SOUTH);
+
+        if (is_pad && found < 0) {
+            snprintf(path_out, path_len, "%s", path);
+            snprintf(found_uniq, sizeof(found_uniq), "%s", uniq);
+            snprintf(found_phys, sizeof(found_phys), "%s", phys);
+            found = fd;
+        } else if (nc < 32) {
+            cand[nc] = fd;
+            snprintf(cand_uniq[nc], 64, "%s", uniq);
+            snprintf(cand_phys[nc], 64, "%s", phys);
+            nc++;
+        } else {
+            close(fd);
+        }
+    }
+    closedir(dir);
+
+    for (int i = 0; i < nc; i++) {
+        int same = found >= 0 &&
+                   ((found_uniq[0] && strcmp(found_uniq, cand_uniq[i]) == 0) ||
+                    (found_phys[0] && strcmp(found_phys, cand_phys[i]) == 0));
+        if (same && *n_extra < MAX_EXTRA) extra[(*n_extra)++] = cand[i];
+        else close(cand[i]);
+    }
+    return found;
+}
+
+static void ds4_read_ranges(int fd) {
+    static const int axes[] = { ABS_X, ABS_Y, ABS_RX, ABS_RY, ABS_Z, ABS_RZ };
+    for (size_t i = 0; i < sizeof(axes) / sizeof(axes[0]); i++) {
+        struct input_absinfo ai;
+        if (ioctl(fd, EVIOCGABS(axes[i]), &ai) == 0 && ai.maximum > ai.minimum) {
+            ds4_rng[axes[i]].min = ai.minimum;
+            ds4_rng[axes[i]].max = ai.maximum;
+        } else {
+            ds4_rng[axes[i]].min = 0;
+            ds4_rng[axes[i]].max = 255;
+        }
+    }
+}
+
+/* stick: [min,max] -> [-32767, 32767] */
+static int16_t scale_stick(int code, int v) {
+    int lo = ds4_rng[code].min, hi = ds4_rng[code].max;
+    long span = (long)hi - lo;
+    long out = ((long)(v - lo) * 65534L) / span - 32767L;
+    if (out < -32767) out = -32767;
+    if (out > 32767) out = 32767;
+    return (int16_t)out;
+}
+
+/* grilletto: [min,max] -> [0, 255] */
+static uint8_t scale_trigger(int code, int v) {
+    int lo = ds4_rng[code].min, hi = ds4_rng[code].max;
+    long out = ((long)(v - lo) * 255L) / ((long)hi - lo);
+    if (out < 0) out = 0;
+    if (out > 255) out = 255;
+    return (uint8_t)out;
+}
+
+/*
+ * hid-playstation/hid-sony: Quadrato = BTN_WEST (0x134), Triangolo = BTN_NORTH (0x133).
+ * Sul pad Xbox virtuale 0x133 e' X (a sinistra) e 0x134 e' Y (in alto): li scambiamo,
+ * cosi' i pulsanti corrispondono per posizione.
+ */
+static int handle_ds4(int fd, struct state *s) {
+    struct input_event evs[64];
+    int synced = 0;
+    for (;;) {
+        ssize_t n = read(fd, evs, sizeof(evs));
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EINTR) break;
+            return -1;
+        }
+        if (n == 0) return -1;
+        size_t count = (size_t)n / sizeof(struct input_event);
+        for (size_t i = 0; i < count; i++) {
+            const struct input_event *e = &evs[i];
+            if (e->type == EV_SYN && e->code == SYN_REPORT) {
+                synced = 1;
+            } else if (e->type == EV_KEY) {
+                int v = e->value != 0;
+                int code = e->code;
+                if (code == BTN_WEST) code = BTN_NORTH;
+                else if (code == BTN_NORTH) code = BTN_WEST;
+                set_button(s, code, v);
+            } else if (e->type == EV_ABS) {
+                switch (e->code) {
+                case ABS_X:  s->lx = scale_stick(ABS_X, e->value); break;
+                case ABS_Y:  s->ly = scale_stick(ABS_Y, e->value); break;
+                case ABS_RX: s->rx = scale_stick(ABS_RX, e->value); break;
+                case ABS_RY: s->ry = scale_stick(ABS_RY, e->value); break;
+                case ABS_Z:  s->lt = scale_trigger(ABS_Z, e->value); break;
+                case ABS_RZ: s->rt = scale_trigger(ABS_RZ, e->value); break;
+                case ABS_HAT0X: s->left = e->value < 0; s->right = e->value > 0; break;
+                case ABS_HAT0Y: s->up = e->value < 0; s->down = e->value > 0; break;
+                }
+            }
+        }
+    }
+    return synced;
+}
+
+/* svuota i nodi extra (touchpad/sensori) bloccati: ritorna -1 se spariti */
+static int drain(int fd) {
+    struct input_event evs[64];
+    for (;;) {
+        ssize_t n = read(fd, evs, sizeof(evs));
+        if (n < 0) return (errno == EAGAIN || errno == EINTR) ? 0 : -1;
+        if (n == 0) return -1;
+    }
+}
+
+static int run_ds4(void) {
+    char path[300] = "";
+    int extra[MAX_EXTRA];
+    int n_extra = 0;
+    int fd = open_ds4(path, sizeof(path), extra, &n_extra);
+    if (fd < 0) {
+        fprintf(stderr, "DualShock 4 non trovato. Collegalo via Bluetooth (o USB) e riprova.\n");
+        return 1;
+    }
+    char name[256] = "";
+    ioctl(fd, EVIOCGNAME(sizeof(name) - 1), name);
+    printf("Controller: %s (%s)\n", name, path);
+    ds4_read_ranges(fd);
+
+    int fu = open("/dev/uhid", O_RDWR | O_CLOEXEC);
+    if (fu < 0) {
+        perror("open /dev/uhid (serve la shell di Shizuku/adb)");
+        return 1;
+    }
+    if (uhid_create(fu) < 0) return 1;
+
+    if (ioctl(fd, EVIOCGRAB, 1) < 0) perror("EVIOCGRAB controller");
+    for (int i = 0; i < n_extra; i++) ioctl(extra[i], EVIOCGRAB, 1);
+    if (n_extra) printf("Bloccati anche %d nodi extra (touchpad/sensori).\n", n_extra);
+
+    printf("DualShock 4 -> %s attivo. Ctrl+C per uscire.\n",
+           xinput_mode ? "pad Xbox 360 (045E:028E)" : "gamepad generico");
+
+    struct state s;
+    memset(&s, 0, sizeof(s));
+    s.analog_triggers = 1;
+    int started = 0;
+
+    struct pollfd pfd[2 + MAX_EXTRA];
+    pfd[0].fd = fd; pfd[0].events = POLLIN;
+    pfd[1].fd = fu; pfd[1].events = POLLIN;
+    for (int i = 0; i < n_extra; i++) { pfd[2 + i].fd = extra[i]; pfd[2 + i].events = POLLIN; }
+    int nfds = 2 + n_extra;
+
+    while (running) {
+        int r = poll(pfd, (nfds_t)nfds, 1000);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            perror("poll");
+            break;
+        }
+        if (pfd[1].revents & POLLIN) {
+            struct uhid_event ev;
+            if (read(fu, &ev, sizeof(ev)) > 0 && ev.type == UHID_START) started = 1;
+        }
+        for (int i = 0; i < n_extra; i++) {
+            if (pfd[2 + i].revents & (POLLERR | POLLHUP | POLLNVAL)) pfd[2 + i].fd = -1;
+            else if ((pfd[2 + i].revents & POLLIN) && drain(pfd[2 + i].fd) < 0) pfd[2 + i].fd = -1;
+        }
+        if (pfd[0].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+            fprintf(stderr, "DualShock 4 disconnesso.\n");
+            break;
+        }
+        if (pfd[0].revents & POLLIN) {
+            int h = handle_ds4(fd, &s);
+            if (h < 0) {
+                fprintf(stderr, "DualShock 4 disconnesso.\n");
+                break;
+            }
+            if (h > 0 && started && send_report(fu, &s) < 0) break;
+        }
+    }
+
+    uhid_destroy(fu);
+    close(fu);
+    ioctl(fd, EVIOCGRAB, 0);
+    close(fd);
+    for (int i = 0; i < n_extra; i++) { ioctl(extra[i], EVIOCGRAB, 0); close(extra[i]); }
+    printf("\nGamepad virtuale rimosso, DualShock 4 restituito ad Android.\n");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--xinput") == 0) xinput_mode = 1;
+        else if (strcmp(argv[i], "--ds4") == 0) ds4_mode = 1;
         else {
-            fprintf(stderr, "Opzione sconosciuta: %s\nUso: %s [--xinput]\n", argv[i], argv[0]);
+            fprintf(stderr, "Opzione sconosciuta: %s\nUso: %s [--ds4] [--xinput]\n", argv[i], argv[0]);
             return 2;
         }
     }
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
     signal(SIGHUP, on_signal);
+
+    if (ds4_mode) return run_ds4();
 
     char pl[300] = "", pr[300] = "";
     int fl = open_by_name(NAME_L, pl, sizeof(pl));

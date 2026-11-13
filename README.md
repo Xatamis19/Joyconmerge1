@@ -41,6 +41,24 @@ Android carica il suo layout Xbox già pronto, quindi emulatori e giochi che ric
 controller "XInput"/Xbox lo vedono come tale. I pulsanti seguono la **posizione** (quello in basso
 è A), non le lettere stampate sul Joy-Con. La vibrazione non viene ancora inoltrata.
 
+## DualShock 4 → Xbox 360 (XInput)
+Scegli **DualShock 4** in alto nell'app: invece dei Joy-Con il motore legge un DualShock 4
+(funziona anche con il DualSense) e lo ripresenta come pad Xbox 360 (`045E:028E`).
+Utile per giochi ed emulatori Windows (Winlator, GameNative…) che riconoscono solo controller XInput.
+
+| DualShock 4 | Gamepad Xbox virtuale |
+|---|---|
+| Stick sinistro / destro | X / Y, RX / RY |
+| L2 / R2 | grilletti LT / RT **analogici** |
+| Croce, Cerchio, Quadrato, Triangolo | A, B, X, Y (per posizione) |
+| L1 / R1, L3 / R3 | LB / RB, LS / RS |
+| Share, Options, PS | Back, Start, Guide |
+| Croce direzionale | D-pad |
+
+Touchpad e sensori di movimento vengono bloccati insieme al controller, così Android vede un solo
+pad. Il clic del touchpad e la vibrazione non vengono ancora inoltrati.
+Da shell: `joycon_merge --ds4 --xinput`.
+
 ## Come funziona
 L'app avvia tramite Shizuku un piccolo programma C (`app/src/main/cpp/joycon_merge.c`)
 con i permessi della shell: legge i due dispositivi evdev, li blocca con `EVIOCGRAB`
