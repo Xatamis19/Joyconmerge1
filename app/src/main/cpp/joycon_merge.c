@@ -35,6 +35,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #define NAME_L "Joy-Con (L)"
@@ -162,6 +163,12 @@ static const uint8_t rdesc_xinput[] = {
 };
 
 static int xinput_mode = 0;
+/*
+ * 1 = pad Xbox con assi "alla Android generica": stick destro su Z/RZ e grilletti su
+ * BRAKE/GAS. Serve quando il telefono non ha il layout Xbox (Vendor_045e_Product_028e.kl):
+ * senza quel file lo stick destro RX/RY non viene letto da giochi ed emulatori.
+ */
+static int xinput_alt = 0;
 static int ds4_mode = 0;
 
 #pragma pack(push, 1)
@@ -230,8 +237,9 @@ static int uhid_create(int fd) {
     struct uhid_event ev;
     memset(&ev, 0, sizeof(ev));
     ev.type = UHID_CREATE2;
-    const uint8_t *rd = xinput_mode ? rdesc_xinput : rdesc_generic;
-    size_t rd_size = xinput_mode ? sizeof(rdesc_xinput) : sizeof(rdesc_generic);
+    int use_x = xinput_mode && !xinput_alt;
+    const uint8_t *rd = use_x ? rdesc_xinput : rdesc_generic;
+    size_t rd_size = use_x ? sizeof(rdesc_xinput) : sizeof(rdesc_generic);
     snprintf((char *)ev.u.create2.name, sizeof(ev.u.create2.name), "%s",
              xinput_mode ? "Microsoft X-Box 360 pad"
                          : ds4_mode ? "DualShock 4 (merge)" : "Joy-Con Combined (merge)");
@@ -245,6 +253,53 @@ static int uhid_create(int fd) {
     ev.u.create2.country = 0;
     memcpy(ev.u.create2.rd_data, rd, rd_size);
     return uhid_write(fd, &ev);
+}
+
+static long now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
+/*
+ * Chiede ad Android (dumpsys input) quali assi vede sul pad virtuale e li scrive nel
+ * registro. Ritorna 1 se lo stick destro e' arrivato come RX/RY (= manca il layout Xbox
+ * e i giochi non lo leggerebbero), 0 se e' tutto a posto, -1 se non si capisce.
+ */
+static int check_android_axes(const char *devname) {
+    FILE *f = popen("dumpsys input 2>/dev/null", "r");
+    if (!f) return -1;
+    char line[512], axes[256] = "";
+    int in_reader = 0, in_dev = 0, has_rx = 0, has_z = 0, found = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (strstr(line, "Input Reader State")) { in_reader = 1; continue; }
+        if (!in_reader) continue;
+        if (strncmp(line, "  Device ", 9) == 0) {
+            if (in_dev) break;
+            in_dev = strstr(line, devname) != NULL;
+            continue;
+        }
+        if (!in_dev) continue;
+        char *src = strstr(line, ": source=JOYSTICK");
+        if (!src) continue;
+        found = 1;
+        *src = 0;
+        char *name = line;
+        while (*name == ' ') name++;
+        if (strlen(axes) + strlen(name) + 2 < sizeof(axes)) {
+            strcat(axes, name);
+            strcat(axes, " ");
+        }
+        if (strcmp(name, "RX") == 0) has_rx = 1;
+        if (strcmp(name, "Z") == 0) has_z = 1;
+    }
+    pclose(f);
+    if (!found) {
+        printf("Assi visti da Android: (non trovati)\n");
+        return -1;
+    }
+    printf("Assi visti da Android: %s\n", axes);
+    return (has_rx && !has_z) ? 1 : 0;
 }
 
 static void uhid_destroy(int fd) {
@@ -610,6 +665,8 @@ static int run_ds4(void) {
     memset(&s, 0, sizeof(s));
     s.analog_triggers = 1;
     int started = 0;
+    long check_at = -1;      /* quando controllare gli assi visti da Android */
+    int checked = 0;
 
     struct pollfd pfd[2 + MAX_EXTRA];
     pfd[0].fd = fd; pfd[0].events = POLLIN;
@@ -618,7 +675,7 @@ static int run_ds4(void) {
     int nfds = 2 + n_extra;
 
     while (running) {
-        int r = poll(pfd, (nfds_t)nfds, 1000);
+        int r = poll(pfd, (nfds_t)nfds, 300);
         if (r < 0) {
             if (errno == EINTR) continue;
             perror("poll");
@@ -626,7 +683,21 @@ static int run_ds4(void) {
         }
         if (pfd[1].revents & POLLIN) {
             struct uhid_event ev;
-            if (read(fu, &ev, sizeof(ev)) > 0 && ev.type == UHID_START) started = 1;
+            if (read(fu, &ev, sizeof(ev)) > 0 && ev.type == UHID_START) {
+                started = 1;
+                if (!checked) check_at = now_ms() + 1500;
+            }
+        }
+        if (!checked && check_at > 0 && now_ms() >= check_at) {
+            checked = 1;
+            if (xinput_mode && check_android_axes("Microsoft X-Box 360 pad") == 1) {
+                printf("Manca il layout Xbox: ricreo il pad con stick destro su Z/RZ.\n");
+                uhid_destroy(fu);
+                xinput_alt = 1;
+                started = 0;
+                if (uhid_create(fu) < 0) break;
+                check_at = -1;
+            }
         }
         for (int i = 0; i < n_extra; i++) {
             if (pfd[2 + i].revents & (POLLERR | POLLHUP | POLLNVAL)) pfd[2 + i].fd = -1;
@@ -700,6 +771,8 @@ int main(int argc, char **argv) {
     struct state s;
     memset(&s, 0, sizeof(s));
     int started = 0;
+    long check_at = -1;
+    int checked = 0;
 
     struct pollfd pfd[3] = {
         { .fd = fl, .events = POLLIN },
@@ -708,7 +781,7 @@ int main(int argc, char **argv) {
     };
 
     while (running) {
-        int r = poll(pfd, 3, 1000);
+        int r = poll(pfd, 3, 300);
         if (r < 0) {
             if (errno == EINTR) continue;
             perror("poll");
@@ -716,7 +789,22 @@ int main(int argc, char **argv) {
         }
         if (pfd[2].revents & POLLIN) {
             struct uhid_event ev;
-            if (read(fu, &ev, sizeof(ev)) > 0 && ev.type == UHID_START) started = 1;
+            if (read(fu, &ev, sizeof(ev)) > 0 && ev.type == UHID_START) {
+                started = 1;
+                if (!checked) check_at = now_ms() + 1500;
+            }
+        }
+        if (!checked && check_at > 0 && now_ms() >= check_at) {
+            checked = 1;
+            if (xinput_mode && check_android_axes("Microsoft X-Box 360 pad") == 1) {
+                printf("Manca il layout Xbox: ricreo il pad con stick destro su Z/RZ.\n");
+                uhid_destroy(fu);
+                xinput_alt = 1;
+                started = 0;
+                if (uhid_create(fu) < 0) break;
+            } else if (!xinput_mode) {
+                check_android_axes("Joy-Con Combined (merge)");
+            }
         }
         int changed = 0;
         for (int i = 0; i < 2; i++) {
